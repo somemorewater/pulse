@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pulse — Live Odds Engine</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Pulse <span class="subtitle">live odds calculation engine</span></h1>
+      <p class="pipeline" id="pipeline" aria-label="data pipeline">
+        <span>UI</span><span class="arrow">→</span><span>API</span><span class="arrow">→</span><span>Go engine</span><span class="arrow">→</span><span>Redis</span><span class="arrow">→</span><span>WebSocket</span><span class="arrow">→</span><span>UI</span>
+        <span class="pulse-dot" id="pulse-dot" title="flashes on each live update"></span>
+      </p>
+    </div>
+    <div class="conn" id="conn-badge" role="status">
+      <span class="conn-dot"></span><span id="conn-text">Disconnected</span>
+    </div>
+  </header>
+
+  <div class="toast-stack" id="toasts" aria-live="polite"></div>
+
+  <main>
+    <section class="panel" id="create-panel">
+      <h2>New simulated match</h2>
+      <form id="create-form">
+        <label>Home team <input id="home-team" name="home_team" maxlength="64" required value="Arsenal" /></label>
+        <label>Away team <input id="away-team" name="away_team" maxlength="64" required value="Chelsea" /></label>
+        <button type="submit">Create match</button>
+      </form>
+    </section>
+
+    <div id="dashboard" hidden>
+      <div class="grid">
+        <div class="col">
+          <section class="panel scoreboard">
+            <div class="match-line">
+              <span id="status-pill" class="pill">scheduled</span>
+              <span class="seq">seq <strong id="seq">0</strong></span>
+            </div>
+            <div class="teams">
+              <div class="team"><span id="home-name">—</span><strong id="home-score">0</strong></div>
+              <div class="minute"><span id="minute">0</span><small>min</small></div>
+              <div class="team"><strong id="away-score">0</strong><span id="away-name">—</span></div>
+            </div>
+            <div class="odds-row">
+              <div class="odd"><small>Home (1)</small><strong id="odds-home">—</strong></div>
+              <div class="odd"><small>Draw (X)</small><strong id="odds-draw">—</strong></div>
+              <div class="odd"><small>Away (2)</small><strong id="odds-away">—</strong></div>
+            </div>
+            <p class="meta">updated <span id="updated-at">—</span></p>
+          </section>
+
+          <section class="panel">
+            <h2>Event simulator</h2>
+            <p class="hint">Submits to <code>POST /api/matches/:id/events</code>. The Go engine stays authoritative.</p>
+            <div class="btn-grid" id="sim-buttons">
+              <button data-ev="match_start">Start match</button>
+              <button data-ev="goal_home">Goal home</button>
+              <button data-ev="goal_away">Goal away</button>
+              <button data-ev="yellow_card_home">Yellow home</button>
+              <button data-ev="yellow_card_away">Yellow away</button>
+              <button data-ev="red_card_home">Red home</button>
+              <button data-ev="red_card_away">Red away</button>
+              <button data-ev="minute_update" data-min="1">+1 minute</button>
+              <button data-ev="minute_update" data-min="5">+5 minutes</button>
+              <button data-ev="match_end" class="danger">End match</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>Engine metrics</h2>
+            <p class="metric">Last event: <strong id="lat-last">unavailable</strong></p>
+            <p class="metric">Rolling (last <span id="lat-n">0</span>): min <strong id="lat-min">—</strong> · avg <strong id="lat-avg">—</strong> · max <strong id="lat-max">—</strong></p>
+            <p class="hint">Real values from the engine only. Nothing is fabricated.</p>
+          </section>
+        </div>
+
+        <div class="col">
+          <section class="panel">
+            <h2>Recent events</h2>
+            <ol class="feed" id="feed"></ol>
+          </section>
+
+          <section class="panel">
+            <h2>Provably fair</h2>
+            <dl class="fair">
+              <div><dt>Commitment</dt><dd><code id="fair-commitment">—</code></dd></div>
+              <div><dt>Algorithm</dt><dd id="fair-algo">—</dd></div>
+              <div><dt>Sequence</dt><dd id="fair-seq">—</dd></div>
+              <div><dt>Status</dt><dd id="fair-status">unverified</dd></div>
+            </dl>
+            <div class="row">
+              <button id="reveal-btn">Reveal seed</button>
+              <button id="verify-btn" disabled>Verify result</button>
+            </div>
+            <p class="hint" id="fair-hint">Reveal publishes the seed (intended reveal stage), then verification recomputes every market independently.</p>
+            <p class="seed" id="fair-seed" hidden>seed: <code id="fair-seed-val"></code></p>
+          </section>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

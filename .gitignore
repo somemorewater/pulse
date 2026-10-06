@@ -1,0 +1,45 @@
+# Environment & secrets (examples are safe; real files never commit)
+.env
+.env.*
+!*.example
+
+# Dependencies
+node_modules/
+api/node_modules/
+
+# Go build artifacts
+*.exe
+*.out
+*.test
+/bin/
+/dist/
+__debug_bin*
+
+# Frontend build output
+api/public/dist/
+*.map
+
+# Logs
+*.log
+logs/
+
+# Databases / volumes
+*.db
+*.sqlite
+data/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp
+*.bak
+/tmp/
