@@ -3,17 +3,20 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pulse — Live Odds Engine</title>
+  <title>Pulse — Live Odds Console</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div>
-      <h1>Pulse <span class="subtitle">live odds calculation engine</span></h1>
-      <p class="pipeline" id="pipeline" aria-label="data pipeline">
-        <span>UI</span><span class="arrow">→</span><span>API</span><span class="arrow">→</span><span>Go engine</span><span class="arrow">→</span><span>Redis</span><span class="arrow">→</span><span>WebSocket</span><span class="arrow">→</span><span>UI</span>
-        <span class="pulse-dot" id="pulse-dot" title="flashes on each live update"></span>
-      </p>
+      <h1>Pulse <span class="subtitle">real-time odds console</span></h1>
+      <nav class="tabs" aria-label="console sections">
+        <a href="#/overview" data-nav="overview">Overview</a>
+        <a href="#/live" data-nav="live">Live Matches</a>
+        <a href="#/scenarios" data-nav="scenarios">Scenario Lab</a>
+        <a href="#/events" data-nav="events">Event Explorer</a>
+        <a href="#/fairness" data-nav="fairness">Fairness</a>
+      </nav>
     </div>
     <div class="conn" id="conn-badge" role="status">
       <span class="conn-dot"></span><span id="conn-text">Disconnected</span>
@@ -23,39 +26,75 @@
   <div class="toast-stack" id="toasts" aria-live="polite"></div>
 
   <main>
-    <section class="panel" id="create-panel">
-      <h2>New simulated match</h2>
-      <form id="create-form">
-        <label>Home team <input id="home-team" name="home_team" maxlength="64" required value="Arsenal" /></label>
-        <label>Away team <input id="away-team" name="away_team" maxlength="64" required value="Chelsea" /></label>
-        <button type="submit">Create match</button>
-      </form>
-    </section>
-
-    <div id="dashboard" hidden>
+    <section data-view="overview">
       <div class="grid">
         <div class="col">
-          <section class="panel scoreboard">
-            <div class="match-line">
-              <span id="status-pill" class="pill">scheduled</span>
-              <span class="seq">seq <strong id="seq">0</strong></span>
+          <section class="panel">
+            <h2>Pipeline health <small class="muted" id="health-age"></small></h2>
+            <div id="health-cards" class="health-grid"><p class="muted">Checking…</p></div>
+            <p class="hint">Polled every 10s for observability. Live match data always arrives over WebSocket, never polling.</p>
+          </section>
+          <section class="panel">
+            <h2>Event flow</h2>
+            <p class="pipeline">UI → API → Go engine → PostgreSQL + Redis → Pub/Sub → WebSocket → UI <span class="pulse-dot" id="pulse-dot"></span></p>
+            <div id="recent-issues"><p class="muted">No issues observed.</p></div>
+          </section>
+        </div>
+        <div class="col">
+          <section class="panel">
+            <h2>Matches</h2>
+            <div id="overview-matches"><p class="muted">Loading…</p></div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section data-view="live" hidden>
+      <div class="grid">
+        <div class="col">
+          <section class="panel">
+            <h2>Match workspace</h2>
+            <div class="row wrap">
+              <select id="match-picker" aria-label="select match"></select>
+              <button id="refresh-matches">Refresh list</button>
             </div>
-            <div class="teams">
-              <div class="team"><span id="home-name">—</span><strong id="home-score">0</strong></div>
-              <div class="minute"><span id="minute">0</span><small>min</small></div>
-              <div class="team"><strong id="away-score">0</strong><span id="away-name">—</span></div>
+            <div id="live-empty"><p class="muted">Select a match above, or create one:</p>
+              <form id="create-form" class="row wrap">
+                <label>Home <input id="home-team" maxlength="64" required value="Arsenal" /></label>
+                <label>Away <input id="away-team" maxlength="64" required value="Chelsea" /></label>
+                <button type="submit">Create match</button>
+              </form>
             </div>
-            <div class="odds-row">
-              <div class="odd"><small>Home (1)</small><strong id="odds-home">—</strong></div>
-              <div class="odd"><small>Draw (X)</small><strong id="odds-draw">—</strong></div>
-              <div class="odd"><small>Away (2)</small><strong id="odds-away">—</strong></div>
+            <div id="live-detail" hidden>
+              <div class="match-line">
+                <span id="status-pill" class="pill">scheduled</span>
+                <span class="seq">seq <strong id="seq">0</strong></span>
+              </div>
+              <div class="teams">
+                <div class="team"><span id="home-name">—</span><strong id="home-score">0</strong></div>
+                <div class="minute"><span id="minute">0</span><small>min</small></div>
+                <div class="team"><strong id="away-score">0</strong><span id="away-name">—</span></div>
+              </div>
+              <p class="meta">updated <span id="updated-at">—</span></p>
             </div>
-            <p class="meta">updated <span id="updated-at">—</span></p>
           </section>
 
-          <section class="panel">
+          <section class="panel" id="odds-panel" hidden>
+            <h2>Odds terminal</h2>
+            <div class="odds-row">
+              <div class="odd"><small>Home (1)</small><strong id="odds-home">—</strong><span class="prob" id="prob-home"></span></div>
+              <div class="odd"><small>Draw (X)</small><strong id="odds-draw">—</strong><span class="prob" id="prob-draw"></span></div>
+              <div class="odd"><small>Away (2)</small><strong id="odds-away">—</strong><span class="prob" id="prob-away"></span></div>
+            </div>
+            <div id="prob-bars" class="bars"></div>
+            <p class="meta" id="odds-delta">No movement yet.</p>
+            <canvas id="odds-chart" width="640" height="220" aria-label="probability history chart"></canvas>
+            <p class="hint">History from persisted snapshots + live frames, joined by sequence (no duplicates). Probabilities sum to 1 before the 5% margin.</p>
+          </section>
+
+          <section class="panel" id="sim-panel" hidden>
             <h2>Event simulator</h2>
-            <p class="hint">Submits to <code>POST /api/matches/:id/events</code>. The Go engine stays authoritative.</p>
+            <p class="hint">Real <code>POST /api/matches/:id/events</code> calls. Go stays authoritative. Unavailable actions are disabled.</p>
             <div class="btn-grid" id="sim-buttons">
               <button data-ev="match_start">Start match</button>
               <button data-ev="goal_home">Goal home</button>
@@ -68,13 +107,14 @@
               <button data-ev="minute_update" data-min="5">+5 minutes</button>
               <button data-ev="match_end" class="danger">End match</button>
             </div>
+            <p class="hint" id="sim-note"></p>
           </section>
 
           <section class="panel">
-            <h2>Engine metrics</h2>
-            <p class="metric">Last event: <strong id="lat-last">unavailable</strong></p>
-            <p class="metric">Rolling (last <span id="lat-n">0</span>): min <strong id="lat-min">—</strong> · avg <strong id="lat-avg">—</strong> · max <strong id="lat-max">—</strong></p>
-            <p class="hint">Real values from the engine only. Nothing is fabricated.</p>
+            <h2>Latency</h2>
+            <p class="metric">Engine (Go compute): last <strong id="lat-last">unavailable</strong> · <span id="lat-stats">collecting…</span></p>
+            <p class="metric">API round-trip (this client): last <strong id="api-last">unavailable</strong> · <span id="api-stats">collecting…</span></p>
+            <p class="hint">Engine latency is measured inside Go per event; round-trip includes network + API + engine. p95 needs ≥20 samples. Nothing fabricated.</p>
           </section>
         </div>
 
@@ -83,7 +123,73 @@
             <h2>Recent events</h2>
             <ol class="feed" id="feed"></ol>
           </section>
+        </div>
+      </div>
+    </section>
 
+    <section data-view="scenarios" hidden>
+      <div class="grid">
+        <div class="col">
+          <section class="panel">
+            <h2>Scenario laboratory</h2>
+            <p class="hint">Scenarios execute against the live backend event API — every step is a real POST, applied in sequence. Nothing is simulated in the browser.</p>
+            <div class="row wrap">
+              <label><input type="radio" name="sc-target" value="new" checked /> New match</label>
+              <label><input type="radio" name="sc-target" value="existing" /> Existing match</label>
+            </div>
+            <div class="row wrap" id="sc-new-form">
+              <label>Home <input id="sc-home" maxlength="64" value="Arsenal" /></label>
+              <label>Away <input id="sc-away" maxlength="64" value="Chelsea" /></label>
+            </div>
+            <div class="row wrap" id="sc-existing-form" hidden>
+              <select id="sc-match-picker" aria-label="scenario match"></select>
+            </div>
+            <div class="row wrap">
+              <select id="sc-picker" aria-label="scenario"></select>
+              <button id="sc-run">Run scenario</button>
+            </div>
+            <ol class="feed" id="sc-log"></ol>
+            <p class="hint" id="sc-result"></p>
+          </section>
+        </div>
+        <div class="col">
+          <section class="panel">
+            <h2>Scenario odds evolution</h2>
+            <canvas id="sc-chart" width="640" height="220" aria-label="scenario odds chart"></canvas>
+            <p class="hint">Drawn from the scenario match's persisted history after the run.</p>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section data-view="events" hidden>
+      <div class="grid">
+        <div class="col">
+          <section class="panel">
+            <h2>Event explorer</h2>
+            <p class="hint">Chronological stream for the selected match. Click a row to inspect its payload and odds snapshot.</p>
+            <table class="etable">
+              <thead><tr><th>seq</th><th>time</th><th>event</th><th>min</th><th>engine</th><th>status</th></tr></thead>
+              <tbody id="explorer-rows"></tbody>
+            </table>
+          </section>
+        </div>
+        <div class="col">
+          <section class="panel">
+            <h2>Event detail</h2>
+            <div id="event-detail"><p class="muted">Select an event.</p></div>
+          </section>
+          <section class="panel">
+            <h2>Submission log <small class="muted">(observed by this client)</small></h2>
+            <ol class="feed" id="submission-log"><li class="empty">No submissions yet.</li></ol>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section data-view="fairness" hidden>
+      <div class="grid">
+        <div class="col">
           <section class="panel">
             <h2>Provably fair</h2>
             <dl class="fair">
@@ -92,16 +198,35 @@
               <div><dt>Sequence</dt><dd id="fair-seq">—</dd></div>
               <div><dt>Status</dt><dd id="fair-status">unverified</dd></div>
             </dl>
-            <div class="row">
+            <div class="row wrap">
               <button id="reveal-btn">Reveal seed</button>
-              <button id="verify-btn" disabled>Verify result</button>
+              <button id="verify-btn" disabled>Verify latest</button>
             </div>
-            <p class="hint" id="fair-hint">Reveal publishes the seed (intended reveal stage), then verification recomputes every market independently.</p>
+            <form id="verify-form" class="row wrap">
+              <label>seq <input id="verify-seq" type="number" min="1" required /></label>
+              <label>market
+                <select id="verify-market"><option>1</option><option>X</option><option>2</option></select>
+              </label>
+              <button type="submit">Verify…</button>
+            </form>
             <p class="seed" id="fair-seed" hidden>seed: <code id="fair-seed-val"></code></p>
           </section>
         </div>
+        <div class="col">
+          <section class="panel">
+            <h2>What verification proves</h2>
+            <p>Given the revealed seed, the backend recomputes
+            <code>HMAC-SHA256(seed, match:sequence:market)</code> and compares it
+            against the stored commitment and value. A pass proves the published
+            numbers were fixed before the seed was known.</p>
+            <p><strong>It does not prove the odds themselves are fair.</strong> The
+            probability model is a separate, deliberately simple Poisson simulation;
+            fairness here means deterministic reproducibility, not predictive edge.</p>
+            <p class="hint">The seed appears only after the explicit reveal step — never in normal reads.</p>
+          </section>
+        </div>
       </div>
-    </div>
+    </section>
   </main>
 
   <script type="module" src="/js/app.js"></script>

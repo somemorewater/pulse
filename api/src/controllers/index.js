@@ -32,6 +32,15 @@ export function createQueryController(queryService) {
       const records = await queryService.fairness(id);
       return reply.send({ match_id: id, fairness: records });
     },
+    list: async (req, reply) => {
+      const matches = await queryService.matches(req.query?.limit);
+      return reply.send({ matches });
+    },
+    oddsHistory: async (req, reply) => {
+      const id = validateMatchId(req.params.id);
+      const history = await queryService.oddsHistory(id, req.query?.limit);
+      return reply.send({ match_id: id, history });
+    },
   };
 }
 

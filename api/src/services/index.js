@@ -1,6 +1,6 @@
 // Business orchestration. No odds math here — the Go engine is the only
 // calculation layer. Services compose validation, engine calls and reads.
-import { getMatchRow, getHotState, getHotOdds, getLatestOddsRow, listEvents, listFairness } from '../repositories/store.js';
+import { getMatchRow, getHotState, getHotOdds, getLatestOddsRow, listMatches, listEvents, listFairness, oddsHistory } from '../repositories/store.js';
 
 export function createMatchService(engine) {
   return {
@@ -28,6 +28,8 @@ export function createQueryService() {
     },
     events: (matchId, limit) => listEvents(matchId, limit),
     fairness: (matchId) => listFairness(matchId),
+    matches: (limit) => listMatches(limit),
+    oddsHistory: (matchId, limit) => oddsHistory(matchId, limit),
   };
 }
 

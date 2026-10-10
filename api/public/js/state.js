@@ -1,5 +1,6 @@
-// Single match store. Holds the latest snapshot/update plus derived lists.
-// UI subscribes and re-renders; networking never touches the DOM directly.
+// Match store. Holds snapshots, live updates, persisted history, health and
+// client-observed submission outcomes. UI subscribes and re-renders;
+// networking never touches the DOM directly.
 export const EVENT_LABELS = {
   match_start: 'Match started',
   match_end: 'Match ended',
@@ -33,6 +34,25 @@ export function normalizeOdds(odds) {
   };
 }
 
+// stats over real samples only. p95 needs ≥20 samples, else "collecting".
+export function describeSamples(samples) {
+  const n = samples.length;
+  if (n === 0) return { n, text: 'no samples yet' };
+  const sorted = [...samples].sort((a, b) => a - b);
+  const avg = Math.round(samples.reduce((a, b) => a + b, 0) / n);
+  const p95 = n >= 20 ? sorted[Math.min(n - 1, Math.ceil(n * 0.95) - 1)] : null;
+  return {
+    n,
+    min: sorted[0],
+    avg,
+    max: sorted[n - 1],
+    p95,
+    text: p95 === null
+      ? `min ${sorted[0]} · avg ${avg} · max ${sorted[n - 1]} (p95 needs ${20 - n} more)`
+      : `min ${sorted[0]} · avg ${avg} · p95 ${p95} · max ${sorted[n - 1]}`,
+  };
+}
+
 export function createStore() {
   const listeners = new Set();
   const state = {
@@ -42,12 +62,19 @@ export function createStore() {
     sequence: 0,
     latencyUs: null,
     latencies: [],
+    apiLatencies: [],
     lastUpdate: null,
     events: [], // { sequence, type, minute } — newest first, capped
+    history: [], // merged odds series [{ sequence, probs…, odds…, latency_us, live }] sorted ASC
     fairness: [],
     commitment: null,
     seed: null,
     verifyStatus: 'unverified', // unverified | verified | failed
+    matches: [],
+    health: null,
+    healthAt: null,
+    submissions: [], // client-observed POST outcomes, newest first
+    selectedSeq: null,
   };
 
   function emit() {
@@ -66,8 +93,8 @@ export function createStore() {
       Object.assign(state, {
         matchId, match: null, odds: null, sequence: 0,
         latencyUs: null, latencies: [], lastUpdate: null,
-        events: [], fairness: [], commitment: null,
-        seed: null, verifyStatus: 'unverified',
+        events: [], history: [], fairness: [], commitment: null,
+        seed: null, verifyStatus: 'unverified', selectedSeq: null,
       });
       emit();
     },
@@ -84,32 +111,63 @@ export function createStore() {
       // ahead of a delayed update. Sequences only move forward.
       if (typeof msg.sequence === 'number' && msg.sequence < state.sequence) return;
       state.match = msg.state;
-      state.odds = msg.odds;
+      state.odds = normalizeOdds(msg.odds);
       state.sequence = msg.sequence;
       state.lastUpdate = msg.timestamp ?? new Date().toISOString();
       if (typeof msg.processing_latency_us === 'number') {
         state.latencyUs = msg.processing_latency_us;
-        state.latencies = [...state.latencies, msg.processing_latency_us].slice(-20);
+        state.latencies = [...state.latencies, msg.processing_latency_us].slice(-100);
       }
       state.verifyStatus = 'unverified';
+      this.mergeLivePoint(msg);
       this.prependEvent({ sequence: msg.sequence, type: msg.event_type, minute: msg.state?.minute });
+    },
+    // mergeHistory replaces the persisted series; mergeLivePoint overlays a
+    // frame only when its sequence is absent — WS and history never duplicate.
+    setHistory(rows) {
+      const seen = new Set(rows.map((r) => r.sequence));
+      const liveOnly = state.history.filter((h) => h.live && !seen.has(h.sequence));
+      state.history = [...rows.map((r) => ({ ...r, live: false })), ...liveOnly]
+        .sort((a, b) => a.sequence - b.sequence);
+      emit();
+    },
+    mergeLivePoint(msg) {
+      if (!msg.odds || state.history.some((h) => h.sequence === msg.sequence)) return;
+      const o = msg.odds;
+      state.history = [...state.history, {
+        sequence: msg.sequence,
+        home_prob: o.home_prob, draw_prob: o.draw_prob, away_prob: o.away_prob,
+        home_odds: o.home_odds ?? o.home_win, draw_odds: o.draw_odds ?? o.draw,
+        away_odds: o.away_odds ?? o.away_win,
+        latency_us: msg.processing_latency_us ?? null,
+        live: true,
+      }].sort((a, b) => a.sequence - b.sequence);
+      emit();
     },
     recordRestLatency(us) {
       if (typeof us === 'number') {
         state.latencyUs = us;
-        state.latencies = [...state.latencies, us].slice(-20);
+        state.latencies = [...state.latencies, us].slice(-100);
         emit();
       }
     },
+    recordApiLatency(ms) {
+      state.apiLatencies = [...state.apiLatencies, Math.round(ms * 100) / 100].slice(-100);
+      emit();
+    },
+    submit(entry) {
+      state.submissions = [{ time: new Date().toISOString(), ...entry }, ...state.submissions].slice(0, 30);
+      emit();
+    },
     setEventHistory(events) {
       state.events = events
-        .map((e) => ({ sequence: e.sequence, type: e.type, minute: e.payload?.minute ?? null }))
+        .map((e) => ({ sequence: e.sequence, type: e.type, minute: e.payload?.minute ?? null, created_at: e.created_at, id: e.id }))
         .sort((a, b) => b.sequence - a.sequence)
-        .slice(0, 20);
+        .slice(0, 50);
       emit();
     },
     prependEvent(entry) {
-      state.events = [entry, ...state.events.filter((e) => e.sequence !== entry.sequence)].slice(0, 20);
+      state.events = [entry, ...state.events.filter((e) => e.sequence !== entry.sequence)].slice(0, 50);
       emit();
     },
     setFairness(records, commitment) {
@@ -125,6 +183,19 @@ export function createStore() {
     },
     setVerified(ok) {
       state.verifyStatus = ok ? 'verified' : 'failed';
+      emit();
+    },
+    setMatches(matches) {
+      state.matches = matches;
+      emit();
+    },
+    setHealth(health) {
+      state.health = health;
+      state.healthAt = new Date().toISOString();
+      emit();
+    },
+    selectSeq(seq) {
+      state.selectedSeq = seq;
       emit();
     },
   };

@@ -24,6 +24,8 @@ export function statusForEngineCode(code) {
       return 422;
     case 'not_found':
       return 404;
+    case 'seed_unavailable':
+      return 410;
     case 'rejected':
       return 400;
     default:

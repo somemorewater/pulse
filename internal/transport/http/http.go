@@ -7,6 +7,7 @@
 package enginetransport
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -27,17 +28,23 @@ import (
 
 // error codes consumed by the Node gateway for status mapping.
 const (
-	codeRejected   = "rejected"
-	codeDuplicate  = "duplicate"
-	codeTransition = "invalid_transition"
-	codeNotFound   = "not_found"
-	codeInfra      = "unavailable"
+	codeRejected        = "rejected"
+	codeDuplicate       = "duplicate"
+	codeTransition      = "invalid_transition"
+	codeNotFound        = "not_found"
+	codeSeedUnavailable = "seed_unavailable"
+	codeInfra           = "unavailable"
 )
 
-// Handler wires HTTP to the domain. Seeds live in an in-memory registry
-// (single instance, MVP): restart loses unrevealed seeds, so production
-// would back this with a KMS/vault. Only commitments leave this process
-// before an explicit reveal call.
+// ErrSeedUnavailable means the match exists but its fairness seed cannot be
+// recovered (created before seed persistence, i.e. pre-restart-recovery).
+// History and verification still read fine; only new events and reveal fail.
+var ErrSeedUnavailable = errors.New("engine: fairness seed unavailable, create a new match")
+
+// Handler wires HTTP to the domain. Seeds live in an in-memory registry as a
+// fast path, backed durably by match_seeds: after a restart the first event
+// (or reveal) for a match lazy-loads and re-caches its seed. Only
+// commitments leave this process before an explicit reveal call.
 type Handler struct {
 	pg     *postgres.Store
 	rd     *infraredis.Client
@@ -79,6 +86,8 @@ func serviceErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusBadRequest, codeRejected, "invalid event")
 	case errors.Is(err, postgres.ErrNotFound):
 		writeErr(w, http.StatusNotFound, codeNotFound, "match not found")
+	case errors.Is(err, ErrSeedUnavailable):
+		writeErr(w, http.StatusGone, codeSeedUnavailable, "match exists but its fairness seed cannot be recovered (created before restart recovery); history stays readable, create a new match for live events")
 	default:
 		writeErr(w, http.StatusServiceUnavailable, codeInfra, "engine or infrastructure unavailable")
 	}
@@ -124,15 +133,41 @@ type fairnessJSON struct {
 	Algorithm  string  `json:"algorithm"`
 }
 
-// processorFor builds a per-match processor from the registered seed.
-// Unknown match IDs fail closed: without the seed the engine cannot
-// reproduce that match's fairness stream.
-func (h *Handler) processorFor(matchID string) (*service.Processor, error) {
+// seedFor resolves a match's server seed: fast in-memory path first,
+// durable match_seeds row on a cold process (restart recovery), cached on
+// success. Unknown matches fail closed with NotFound; matches whose seed
+// was never persisted fail with ErrSeedUnavailable (actionable 410).
+func (h *Handler) seedFor(ctx context.Context, matchID string) ([]byte, error) {
 	h.mu.RLock()
 	seed, ok := h.seeds[matchID]
 	h.mu.RUnlock()
-	if !ok {
-		return nil, postgres.ErrNotFound
+	if ok {
+		return seed, nil
+	}
+	seed, err := h.pg.GetSeed(ctx, matchID)
+	if err == nil {
+		h.mu.Lock()
+		h.seeds[matchID] = seed
+		h.mu.Unlock()
+		return seed, nil
+	}
+	if !errors.Is(err, postgres.ErrNotFound) {
+		return nil, err
+	}
+	// No seed row: distinguish a truly unknown match from a legacy one.
+	if _, merr := h.pg.GetMatch(ctx, matchID); merr != nil {
+		return nil, merr // NotFound or infra, passed through as-is
+	}
+	return nil, ErrSeedUnavailable
+}
+
+// processorFor builds a per-match processor from the resolved seed.
+// Match STATE always loads from PostgreSQL per event (service layer), so a
+// recovered seed can never resurrect stale in-memory state — there is none.
+func (h *Handler) processorFor(ctx context.Context, matchID string) (*service.Processor, error) {
+	seed, err := h.seedFor(ctx, matchID)
+	if err != nil {
+		return nil, err
 	}
 	eng, err := engine.NewWithSeed(h.margin, seed)
 	if err != nil {
@@ -218,7 +253,7 @@ func (h *Handler) createMatch(w http.ResponseWriter, r *http.Request) {
 		MatchID: id, HomeTeam: req.HomeTeam, AwayTeam: req.AwayTeam,
 		Status: state.StatusScheduled,
 	}
-	if err := h.pg.CreateMatch(r.Context(), st); err != nil {
+	if err := h.pg.CreateMatch(r.Context(), st, seed, commit); err != nil {
 		if errors.Is(err, postgres.ErrDuplicate) {
 			writeErr(w, http.StatusConflict, codeDuplicate, "match already exists")
 			return
@@ -277,7 +312,7 @@ func (h *Handler) processEvent(w http.ResponseWriter, r *http.Request) {
 		Timestamp: time.Now().UTC(), Payload: p,
 	}
 
-	proc, err := h.processorFor(req.MatchID)
+	proc, err := h.processorFor(r.Context(), req.MatchID)
 	if err != nil {
 		serviceErr(w, err)
 		return
@@ -356,11 +391,9 @@ func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) reveal(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	h.mu.RLock()
-	seed, ok := h.seeds[id]
-	h.mu.RUnlock()
-	if !ok {
-		writeErr(w, http.StatusNotFound, codeNotFound, "match not found")
+	seed, err := h.seedFor(r.Context(), id)
+	if err != nil {
+		serviceErr(w, err)
 		return
 	}
 	commit, err := fairness.Commitment(seed)

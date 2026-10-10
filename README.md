@@ -27,7 +27,7 @@ and WebSockets, and a dependency-free dashboard visualizes the whole flow.
 ```
                     ┌──────────────┐
                     │  PostgreSQL  │  durable: matches, events,
-                    │  :5432       │  odds snapshots, fairness
+                    │  :5434       │  odds snapshots, fairness
                     └──────▲───────┘
                              │ commit first
                     ┌────────┴───────┐
@@ -41,7 +41,7 @@ and WebSockets, and a dependency-free dashboard visualizes the whole flow.
                     └────────┬───────┘
                              │
                     ┌────────▼───────┐
-                    │  Redis :6379   │  hot state + Pub/Sub
+                    │  Redis :6381   │  hot state + Pub/Sub
                     └────────┬───────┘
                              │ pulse:match:{id}:updates
                     ┌────────▼───────┐
@@ -95,8 +95,9 @@ Same state + same inputs ⇒ same output. No hardcoded odds for any scenario.
 ## Provably Fair System
 
 ```
-server seed (32 bytes, crypto/rand, never stored, never pre-revealed)
+server seed (32 bytes, crypto/rand, generated per match at creation)
   → commitment = hex(SHA-256(seed))              published at match creation
+  → seed persisted in match_seeds (reveal path only, never in normal reads)
   → value = HMAC-SHA256(seed, "match:seq:market") / 2^64   in [0,1), per market
   → stored alongside each odds snapshot          (algorithm "pf-v1")
   → reveal                                       returns the seed, timestamps it
@@ -132,6 +133,10 @@ Base `http://localhost:3000`. Errors are always
 curl -X POST localhost:3000/api/matches \
   -H 'content-type: application/json' \
   -d '{"home_team":"Arsenal","away_team":"Chelsea"}'
+
+# List matches + persisted odds history (powers the dashboard charts)
+curl "localhost:3000/api/matches?limit=20"
+curl "localhost:3000/api/matches/m_…/odds/history?limit=200"
 
 # Start the match → 200 { state, odds, fairness, sequence, processing_latency_us }
 curl -X POST localhost:3000/api/matches/m_…/events \
@@ -187,7 +192,7 @@ answered, everything else ignored).
 Prerequisites: Docker, Go ≥ 1.27, Node ≥ 20, `pnpm`.
 
 ```bash
-# 1–2. PostgreSQL + Redis (defaults :5432/:6379).
+# 1–2. PostgreSQL + Redis (defaults :5434/:6381).
 #     On clashes: POSTGRES_PORT=5434 REDIS_PORT=6381 docker compose up -d
 docker compose up -d
 
@@ -195,8 +200,8 @@ docker compose up -d
 go run ./cmd/migrate
 
 # 4. Go engine (:8081).
-DATABASE_URL=postgres://pulse:pulse@localhost:5432/pulse?sslmode=disable \
-REDIS_URL=redis://localhost:6379/0 \
+DATABASE_URL=postgres://pulse:pulse@localhost:5434/pulse?sslmode=disable \
+REDIS_URL=redis://localhost:6381/0 \
   go run ./cmd/engineserver
 
 # 5–6. Node API, which also serves the dashboard (:3000).
@@ -216,13 +221,13 @@ cd api && cp .env.example .env && pnpm install && pnpm start
 
 | Variable | Default | Used by |
 |---|---|---|
-| `DATABASE_URL` | `postgres://pulse:pulse@localhost:5432/pulse?sslmode=disable` | Go, migrate, Node reads |
-| `REDIS_URL` | `redis://localhost:6379/0` | Go, Node |
+| `DATABASE_URL` | `postgres://pulse:pulse@localhost:5434/pulse?sslmode=disable` | Go, migrate, Node reads |
+| `REDIS_URL` | `redis://localhost:6381/0` | Go, Node |
 | `ENGINE_PORT` | `8081` | Go listen port |
 | `PORT` | `3000` | Node listen port |
 | `GO_ENGINE_URL` | `http://localhost:8081` | Node → Go |
 | `MIGRATIONS_DIR` | `db/migrations` | migrate command |
-| `POSTGRES_PORT` / `REDIS_PORT` | `5432` / `6379` | compose host ports |
+| `POSTGRES_PORT` / `REDIS_PORT` | `5434` / `6381` | compose host ports |
 
 Examples in `.env.example` (root) and `api/.env.example`. The dashboard is
 same-origin and needs no configuration. Go `/internal/*` must stay
@@ -259,13 +264,38 @@ values observed during development were in the same tens-of-microseconds range.
 - **WebSockets push** because polling a fast-changing match state wastes
   requests and adds staleness; versioned frames keep the protocol evolvable.
 
+## Restart recovery
+
+Match state already survived restarts in PostgreSQL, but fairness seeds lived
+only in engine memory — so after a restart, old matches read fine yet every
+new event failed with a bare 404. Seeds are now persisted in `match_seeds`
+at creation (same transaction as the match row) and lazy-loaded on first
+use after a restart:
+
+```
+event for unknown-to-memory match
+  → seed cache miss → SELECT match_seeds → cache → process normally
+  → no seed row but match exists → 410 seed_unavailable (create a new match;
+     history and verification keep working)
+  → no match row at all → 404
+```
+
+State always reloads from PostgreSQL per event and Redis is rewritten after
+each commit, so a recovered seed can never resurrect stale state, reset a
+sequence, or replay an event (idempotency constraints unchanged). Seeds leave
+the engine only via the explicit reveal call. Matches created before the
+`0002` migration have no seed row and stay on the 410 path by necessity —
+their seeds are cryptographically unrecoverable.
+
 ## Limitations
 
 - Simplified Poisson odds model; not a sportsbook pricing model.
 - No authentication; internal engine endpoints rely on network locality.
 - No real-money betting (by design).
-- Fairness seeds live in Go process memory — an engine restart orphans
-  unrevealed matches (history stays readable).
+- Fairness seeds persist in `match_seeds` (reveal-only reads); pre-migration
+  matches without a seed row cannot take new events (410) though their
+  history stays readable. Seed storage is demo-grade — production should
+  envelope-encrypt the column with a KMS-managed key.
 - Single engine instance; no distributed consensus or replayable event log
   (Redis Pub/Sub is fire-and-forget).
 - Benchmark is local-only and not production-representative.

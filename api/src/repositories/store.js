@@ -129,6 +129,47 @@ export async function listEvents(matchId, limit = 100) {
   }
 }
 
+export async function listMatches(limit = 50) {
+  try {
+    const n = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const { rows } = await pgPool().query(
+      `SELECT id, home_team, away_team, home_score, away_score, current_minute,
+              status, last_sequence, home_reds, away_reds, home_yellows, away_yellows,
+              created_at
+       FROM matches ORDER BY created_at DESC LIMIT $1`,
+      [n],
+    );
+    return rows.map((r) => ({ ...toMatch(r), created_at: r.created_at }));
+  } catch (err) {
+    throw pgDown(err);
+  }
+}
+
+// Odds history oldest-first. One row per sequence (UNIQUE(match_id,
+// sequence) in PostgreSQL), so charts and the live stream join without
+// duplicates by keying on sequence.
+export async function oddsHistory(matchId, limit = 200) {
+  await getMatchRow(matchId); // 404 when unknown
+  try {
+    const n = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 1000);
+    const { rows } = await pgPool().query(
+      `SELECT sequence, home_probability, draw_probability, away_probability,
+              home_odds, draw_odds, away_odds, processing_latency_ns, created_at
+       FROM odds_snapshots WHERE match_id = $1 ORDER BY sequence ASC LIMIT $2`,
+      [matchId, n],
+    );
+    return rows.map((r) => ({
+      sequence: Number(r.sequence),
+      home_prob: r.home_probability, draw_prob: r.draw_probability, away_prob: r.away_probability,
+      home_odds: r.home_odds, draw_odds: r.draw_odds, away_odds: r.away_odds,
+      latency_us: Math.round(Number(r.processing_latency_ns) / 1000),
+      created_at: r.created_at,
+    }));
+  } catch (err) {
+    if (err.status) throw err;
+    throw pgDown(err);
+  }
+}
 export async function listFairness(matchId) {
   await getMatchRow(matchId); // 404 when unknown
   try {

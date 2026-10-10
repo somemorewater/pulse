@@ -14,8 +14,8 @@ type Config struct {
 // falling back to local-dev defaults.
 func Load() Config {
 	return Config{
-		firstNonEmpty(os.Getenv("DATABASE_URL"), "postgres://pulse:pulse@localhost:5432/pulse?sslmode=disable"),
-		firstNonEmpty(os.Getenv("REDIS_URL"), "redis://localhost:6379/0"),
+		firstNonEmpty(os.Getenv("DATABASE_URL"), "postgres://pulse:pulse@localhost:5434/pulse?sslmode=disable"),
+		firstNonEmpty(os.Getenv("REDIS_URL"), "redis://localhost:6381/0"),
 		firstNonEmpty(os.Getenv("ENGINE_PORT"), "8081"),
 	}
 }

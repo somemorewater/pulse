@@ -1,8 +1,10 @@
 // Public routes. The /internal/* engine contract stays behind the gateway.
 export function registerMatchRoutes(app, c) {
   app.post('/api/matches', c.matches.create);
+  app.get('/api/matches', c.query.list);
   app.get('/api/matches/:id', c.query.detail);
   app.get('/api/matches/:id/odds', c.query.odds);
+  app.get('/api/matches/:id/odds/history', c.query.oddsHistory);
   app.get('/api/matches/:id/events', c.query.events);
   app.post('/api/matches/:id/events', c.events.submit);
   app.get('/api/matches/:id/fairness', c.query.fairness);

@@ -110,9 +110,20 @@ const matchCols = `id, home_team, away_team, home_score, away_score,
 	home_reds, away_reds, home_yellows, away_yellows,
 	created_at, updated_at`
 
-// CreateMatch inserts the initial row for a new match.
-func (s *Store) CreateMatch(ctx context.Context, st state.MatchState) error {
-	_, err := s.db.ExecContext(ctx, `
+// CreateMatch inserts the initial match row together with its fairness seed
+// in one transaction, so a match is never creatable without recoverable
+// seed material. The seed is readable only via GetSeed (reveal path).
+func (s *Store) CreateMatch(ctx context.Context, st state.MatchState, seed []byte, commitment string) error {
+	if len(seed) == 0 || commitment == "" {
+		return fmt.Errorf("seed and commitment are required: %w", ErrInfra)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: begin: %v", ErrInfra, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO matches (id, home_team, away_team, home_score, away_score,
 			current_minute, status, last_sequence,
 			home_reds, away_reds, home_yellows, away_yellows)
@@ -120,14 +131,42 @@ func (s *Store) CreateMatch(ctx context.Context, st state.MatchState) error {
 		st.MatchID, st.HomeTeam, st.AwayTeam, st.HomeScore, st.AwayScore,
 		st.Minute, st.Status, st.Sequence,
 		st.HomeReds, st.AwayReds, st.HomeYellows, st.AwayYellows,
-	)
-	if err != nil {
+	); err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("match %s already exists: %w", st.MatchID, ErrDuplicate)
 		}
 		return fmt.Errorf("%w: create match: %v", ErrInfra, err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO match_seeds (match_id, seed, commitment)
+		VALUES ($1,$2,$3)`,
+		st.MatchID, seed, commitment,
+	); err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("match %s already exists: %w", st.MatchID, ErrDuplicate)
+		}
+		return fmt.Errorf("%w: store seed: %v", ErrInfra, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%w: commit: %v", ErrInfra, err)
+	}
 	return nil
+}
+
+// GetSeed returns the stored server seed for restart recovery and reveal.
+// Callers must never expose it except through the intentional reveal flow.
+func (s *Store) GetSeed(ctx context.Context, matchID string) ([]byte, error) {
+	var seed []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT seed FROM match_seeds WHERE match_id=$1`, matchID,
+	).Scan(&seed)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("%w: get seed: %v", ErrInfra, err)
+	}
+	return seed, nil
 }
 
 // GetMatch loads the durable match row (source of truth for sequencing).

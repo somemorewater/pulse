@@ -12,8 +12,10 @@ Flow: `client → Node :3000 → Go :8081 → PostgreSQL + Redis`.
 |---|---|---|
 | `GET` | `/health` | Service + dependency status (`engine`, `postgres`, `redis`) |
 | `POST` | `/api/matches` | Create a match |
+| `GET` | `/api/matches` | List matches (newest 50) |
 | `GET` | `/api/matches/:id` | Match + score + minute + status + odds + sequence |
 | `GET` | `/api/matches/:id/odds` | Latest odds |
+| `GET` | `/api/matches/:id/odds/history` | Persisted odds snapshots, oldest-first |
 | `GET` | `/api/matches/:id/events` | Event history (`?limit=`, max 1000) |
 | `POST` | `/api/matches/:id/events` | Submit a live event (forwarded to Go) |
 | `GET` | `/api/matches/:id/fairness` | Stored commitments (no seed) |
@@ -44,6 +46,7 @@ curl -s -X POST localhost:3000/api/matches/m_…/events \
 # → 200 { "state": {…}, "odds": {…}, "fairness": […], "sequence": 2, "processing_latency_us": N }
 
 # Reads
+curl -s localhost:3000/api/matches               # list (newest first)
 curl -s localhost:3000/api/matches/m_…            # match + odds + sequence
 curl -s localhost:3000/api/matches/m_…/events     # history
 curl -s localhost:3000/api/matches/m_…/fairness   # commitments
@@ -101,8 +104,8 @@ Notes:
 |---|---|---|
 | `PORT` | `3000` | API listen port |
 | `GO_ENGINE_URL` | `http://localhost:8081` | Internal Go service |
-| `DATABASE_URL` | `postgres://pulse:pulse@localhost:5432/pulse?sslmode=disable` | Reads (writes go via Go) |
-| `REDIS_URL` | `redis://localhost:6379/0` | Hot-state fast path, PG fallback |
+| `DATABASE_URL` | `postgres://pulse:pulse@localhost:5434/pulse?sslmode=disable` | Reads (writes go via Go) |
+| `REDIS_URL` | `redis://localhost:6381/0` | Hot-state fast path, PG fallback |
 
 ## Run
 
@@ -120,10 +123,19 @@ pnpm start             # :3000
 
 ## Dashboard
 
-The API also serves a dependency-free live dashboard at `http://localhost:3000/`
-(`public/`, no build step): scoreboard with prominent 1X2 odds, event
-simulator (goals/cards/minutes/start/end), chronological event feed, engine
-latency (latest + rolling min/avg/max from real values only), provably-fair
-panel (commitment → reveal → verify per market), and connection badge with
-auto-reconnect (REST refetch, then live frames resume). Deep-link a match
-via `#m=<match_id>`.
+The API also serves a dependency-free console at `http://localhost:3000/`
+(`public/`, no build step, no framework), with hash-routed views:
+
+- **Overview** — dependency health, pipeline, match list (click opens Live),
+  observed issues.
+- **Live Matches** — workspace with match picker, scoreboard, odds terminal
+  (probability bars + persisted/live history chart), status-gated simulator,
+  engine vs API-round-trip latency (p95 at ≥20 samples), event feed.
+- **Scenario Lab** — fresh match by default (or existing), predefined
+  scenarios executed as real sequential API calls with progress + abort.
+- **Event Explorer** — chronological stream with per-event odds/fairness
+  inspection and a client-observed submission log.
+- **Fairness** — commitment, reveal, verify latest or any sequence/market.
+
+Connection badge with auto-reconnect (REST refetch, then live frames resume).
+Deep-link a match via `#/live/<match_id>` (legacy `#m=<id>` redirects).
